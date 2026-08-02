@@ -147,6 +147,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Task> _tasks = [];
   List<Project> _projects = [];
   bool _loading = true;
+  String? _loadError;
   String? _statusFilter;
   String? _dueFilter; // 'overdue' | 'today' | 'upcoming' | null
   int _tabIndex = 0;
@@ -188,14 +189,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadAll() async {
-    final taskData = await supabase.from('tasks').select().order('created_at', ascending: false);
-    final projectData = await supabase.from('projects').select().order('created_at', ascending: false);
-    if (!mounted) return;
-    setState(() {
-      _tasks = taskData.map<Task>((row) => Task.fromMap(row)).toList();
-      _projects = projectData.map<Project>((row) => Project.fromMap(row)).toList();
-      _loading = false;
-    });
+    try {
+      final taskData = await supabase.from('tasks').select().order('created_at', ascending: false);
+      final projectData = await supabase.from('projects').select().order('created_at', ascending: false);
+      if (!mounted) return;
+      setState(() {
+        _tasks = taskData.map<Task>((row) => Task.fromMap(row)).toList();
+        _projects = projectData.map<Project>((row) => Project.fromMap(row)).toList();
+        _loading = false;
+        _loadError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = '$e';
+      });
+    }
   }
 
   /// Runs a Supabase write, surfaces any failure (e.g. an RLS policy silently
@@ -1074,7 +1084,31 @@ class _HomeScreenState extends State<HomeScreen> {
           IconButton(icon: const Icon(Icons.logout), onPressed: () => supabase.auth.signOut()),
         ],
       ),
-      body: _loading ? const Center(child: CircularProgressIndicator()) : pages[_tabIndex],
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _loadError != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.cloud_off, size: 40, color: Colors.grey),
+                        const SizedBox(height: 12),
+                        const Text('Couldn\'t load your data.', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 6),
+                        Text(_loadError!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Retry'),
+                          onPressed: () => setState(() { _loading = true; _loadAll(); }),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : pages[_tabIndex],
       floatingActionButton: FloatingActionButton(
         onPressed: () => showModalBottomSheet(
           context: context,

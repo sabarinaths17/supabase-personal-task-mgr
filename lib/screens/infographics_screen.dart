@@ -115,7 +115,9 @@ class _InfographicsScreenState extends State<InfographicsScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 8),
+            Text('Number of ${_scope == 'tasks' ? 'tasks' : 'subtasks'}', style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6))),
+            const SizedBox(height: 16),
           ],
           Expanded(
             child: entries.isEmpty
@@ -126,6 +128,7 @@ class _InfographicsScreenState extends State<InfographicsScreen> {
                       barGroups: entries.asMap().entries.map((e) {
                         return BarChartGroupData(
                           x: e.key,
+                          showingTooltipIndicators: widget.compact ? [] : [0],
                           barRods: [BarChartRodData(
                             toY: e.value.value.toDouble(),
                             width: widget.compact ? 14 : 20,
@@ -134,6 +137,18 @@ class _InfographicsScreenState extends State<InfographicsScreen> {
                           )],
                         );
                       }).toList(),
+                      barTouchData: BarTouchData(
+                        enabled: false,
+                        touchTooltipData: BarTouchTooltipData(
+                          getTooltipColor: (_) => Colors.transparent,
+                          tooltipPadding: EdgeInsets.zero,
+                          tooltipMargin: 4,
+                          getTooltipItem: (group, groupIndex, rod, rodIndex) => BarTooltipItem(
+                            rod.toY.toInt().toString(),
+                            TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.onSurface),
+                          ),
+                        ),
+                      ),
                       titlesData: FlTitlesData(
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
