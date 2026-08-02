@@ -135,12 +135,20 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     final completedCount = _subtasks.where((s) => s.status == 'completed').length;
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.pop(context),
+        ),
         title: const Text('Task Details'),
         actions: [
-          IconButton(icon: const Icon(Icons.check), onPressed: () async {
-            await _save();
-            if (context.mounted) Navigator.pop(context);
-          }),
+          IconButton(
+            icon: const Icon(Icons.check),
+            tooltip: 'Save',
+            onPressed: () async {
+              await _save();
+              if (context.mounted) Navigator.pop(context);
+            },
+          ),
         ],
       ),
       body: ListView(

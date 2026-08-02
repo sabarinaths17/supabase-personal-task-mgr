@@ -421,6 +421,45 @@ class _HomeScreenState extends State<HomeScreen> {
     return _activeTasks.where((t) => t.status == _statusFilter).toList();
   }
 
+  List<Task> get _tasksDueToday {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return _tasks.where((t) =>
+      t.parentTaskId == null &&
+      !t.isTerminal &&
+      t.dueDate != null &&
+      DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day) == today
+    ).toList();
+  }
+
+  List<Task> get _overdueTasks {
+    final today = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    return _tasks.where((t) =>
+      t.parentTaskId == null &&
+      !t.isTerminal &&
+      t.dueDate != null &&
+      DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day).isBefore(today)
+    ).toList();
+  }
+
+  List<Task> get _wipTasks =>
+    _tasks.where((t) => t.parentTaskId == null && t.status == 'wip').toList();
+
+  List<Task> get _upcomingTasks {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final in7 = today.add(const Duration(days: 7));
+    final list = _tasks.where((t) =>
+      t.parentTaskId == null &&
+      !t.isTerminal &&
+      t.dueDate != null &&
+      DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day).isAfter(today) &&
+      !DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day).isAfter(in7)
+    ).toList();
+    list.sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+    return list;
+  }
+
   Widget _statusBadge(String status, {double fontSize = 11}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -521,38 +560,145 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  String _dashboardSummaryText() {
-    final active = _activeTasks.length;
-    final completedToday = _completedToday;
-    final subToday = _subtasksDueToday.length;
-    final projectsCount = _projects.length;
-    final waiting = _tasks.where((t) => t.status == 'waiting_for').length;
-
-    final buffer = StringBuffer();
-    buffer.write('You have $active active task${active == 1 ? '' : 's'} across $projectsCount project${projectsCount == 1 ? '' : 's'}. ');
-    buffer.write('$completedToday completed today');
-    if (subToday > 0) buffer.write(', with $subToday subtask${subToday == 1 ? '' : 's'} due today');
-    buffer.write('. ');
-    if (waiting > 0) buffer.write('$waiting task${waiting == 1 ? '' : 's'} waiting on something external.');
-    return buffer.toString();
+  String _formatDate(DateTime d) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final date = DateTime(d.year, d.month, d.day);
+    final diff = date.difference(today).inDays;
+    if (diff == 0) return 'Today';
+    if (diff == 1) return 'Tomorrow';
+    if (diff == -1) return 'Yesterday';
+    if (diff > 1 && diff <= 7) {
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      return days[d.weekday - 1];
+    }
+    if (diff < -1) return '${-diff}d ago';
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return '${months[d.month - 1]} ${d.day}';
   }
 
-  Widget _statCard(String label, String value, Color color, IconData icon, {VoidCallback? onTap}) {
+  Widget _quickPill(String label, Color color, IconData icon) {
+    return Container(
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20), border: Border.all(color: color.withValues(alpha: 0.3))),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 5),
+          Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
+        ],
+      ),
+    );
+  }
+
+  Widget _dashSection(String title, IconData icon, Color color, List<Widget> children) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 5),
+          Text(title, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: color, letterSpacing: 0.8)),
+        ]),
+        const SizedBox(height: 6),
+        Container(
+          decoration: BoxDecoration(border: Border(left: BorderSide(color: color.withValues(alpha: 0.35), width: 2))),
+          padding: const EdgeInsets.only(left: 12),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
+        ),
+        const SizedBox(height: 20),
+      ],
+    );
+  }
+
+  Widget _dashTaskRow(Task task, {Color? accentColor}) {
+    final project = _projects.where((p) => p.id == task.projectId);
+    final subCount = _subtaskCountFor(task.id);
+    final subDone = _subtaskCompletedCountFor(task.id);
+    return InkWell(
+      onTap: () => _openTaskDetail(task),
+      onLongPress: () => _showStatusPicker(task),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 32,
+              height: 32,
+              child: _HoverCheckbox(value: task.status == 'completed', onChanged: (val) => _toggleComplete(task, val)),
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    task.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      decoration: task.isTerminal ? TextDecoration.lineThrough : null,
+                    ),
+                  ),
+                  Row(children: [
+                    if (project.isNotEmpty) ...[
+                      Text(project.first.name, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                      const Text(' · ', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                    ],
+                    if (task.dueDate != null)
+                      Text(_formatDate(task.dueDate!), style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                    if (subCount > 0) ...[
+                      const Text(' · ', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      Text('$subDone/$subCount sub', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                    ],
+                  ]),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            _statusBadge(task.status),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _projectHealthCard(Project p) {
+    final done = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null && t.status == 'completed').length;
+    final total = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null).length;
+    final active = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null && !t.isTerminal).length;
+    final progress = total == 0 ? 0.0 : done / total;
+    final color = priorityColor(p.priority);
     return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: color.withValues(alpha: 0.4), width: 1.5)),
+      margin: const EdgeInsets.only(right: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: color.withValues(alpha: 0.35))),
       child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
+        onTap: () => setState(() { _tabIndex = 3; }),
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 140,
+          padding: const EdgeInsets.all(10),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: color, size: 22),
+              Row(children: [
+                _priorityDot(p.priority),
+                const SizedBox(width: 5),
+                Expanded(child: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 1, overflow: TextOverflow.ellipsis)),
+              ]),
               const SizedBox(height: 8),
-              Text(value, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: color)),
-              Text(label, style: const TextStyle(fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(value: progress, minHeight: 5, backgroundColor: Colors.grey.withValues(alpha: 0.15), valueColor: AlwaysStoppedAnimation(color)),
+              ),
+              const SizedBox(height: 5),
+              Text('$active active · $done/$total done', style: const TextStyle(fontSize: 10, color: Colors.grey)),
             ],
           ),
         ),
@@ -561,67 +707,106 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildDashboard() {
+    final now = DateTime.now();
+    final hour = now.hour;
+    final greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
     final counts = _statusCounts;
+    final overdue = _overdueTasks;
+    final today = _tasksDueToday;
+    final wipNotToday = _wipTasks.where((t) => !today.any((d) => d.id == t.id)).toList();
+    final upcoming = _upcomingTasks;
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Header banner
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 20),
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
             decoration: BoxDecoration(
-              gradient: LinearGradient(colors: [Theme.of(context).colorScheme.primary.withValues(alpha: 0.85), Theme.of(context).colorScheme.secondary.withValues(alpha: 0.85)]),
+              gradient: LinearGradient(colors: [
+                Theme.of(context).colorScheme.primary.withValues(alpha: 0.9),
+                Theme.of(context).colorScheme.secondary.withValues(alpha: 0.9),
+              ]),
               borderRadius: BorderRadius.circular(14),
             ),
-            child: const Center(
-              child: Text('Just. Do. It.', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 1.2)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(greeting, style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                const SizedBox(height: 2),
+                const Text('Just. Do. It.', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 1.0)),
+              ],
             ),
           ),
-          const SizedBox(height: 16),
-          Text(_dashboardSummaryText(), style: Theme.of(context).textTheme.bodyMedium),
-          const SizedBox(height: 16),
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 10,
-            childAspectRatio: 1.5,
-            children: [
-              _statCard('Active Tasks', '${_activeTasks.length}', const Color(0xFF5B8DEF), Icons.list_alt),
-              _statCard('Completed Today', '$_completedToday', const Color(0xFF4CAF50), Icons.check_circle),
-              _statCard('Projects', '${_projects.length}', const Color(0xFF8B6DD1), Icons.folder),
-              _statCard(
-                'Subtasks Due Today', '${_subtasksDueToday.length}', const Color(0xFFF5A623), Icons.checklist,
-                onTap: () => setState(() { _showSubtasksOnlyToday = true; _tabIndex = 1; }),
-              ),
-            ],
+          const SizedBox(height: 14),
+
+          // Quick stat pills
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              if (overdue.isNotEmpty) _quickPill('${overdue.length} overdue', const Color(0xFFE55555), Icons.warning_rounded),
+              _quickPill('${today.length} today', const Color(0xFF5B8DEF), Icons.today),
+              _quickPill('$_completedToday done', const Color(0xFF4CAF50), Icons.check_circle_outline),
+              _quickPill('${_wipTasks.length} WIP', const Color(0xFFF5A623), Icons.bolt),
+              _quickPill('${_activeTasks.length} active', Colors.grey, Icons.list_alt),
+            ]),
           ),
-          const SizedBox(height: 24),
-          Text('By Status', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 22),
+
+          // Overdue
+          if (overdue.isNotEmpty)
+            _dashSection('OVERDUE', Icons.warning_rounded, const Color(0xFFE55555),
+              overdue.map((t) => _dashTaskRow(t, accentColor: const Color(0xFFE55555))).toList()),
+
+          // Today
+          _dashSection('TODAY', Icons.today, const Color(0xFF5B8DEF),
+            today.isEmpty
+              ? [Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Text('Nothing due today — you\'re clear.', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
+                )]
+              : today.map((t) => _dashTaskRow(t)).toList()),
+
+          // WIP not already in today
+          if (wipNotToday.isNotEmpty)
+            _dashSection('IN PROGRESS', Icons.bolt, const Color(0xFFF5A623),
+              wipNotToday.map((t) => _dashTaskRow(t, accentColor: const Color(0xFFF5A623))).toList()),
+
+          // Upcoming
+          if (upcoming.isNotEmpty)
+            _dashSection('UPCOMING — next 7 days', Icons.event, const Color(0xFF8B6DD1),
+              upcoming.map((t) => _dashTaskRow(t, accentColor: const Color(0xFF8B6DD1))).toList()),
+
+          // Projects
+          if (_projects.isNotEmpty) ...[
+            Text('PROJECTS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5), letterSpacing: 0.8)),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 90,
+              child: ListView(scrollDirection: Axis.horizontal, children: _projects.map(_projectHealthCard).toList()),
+            ),
+            const SizedBox(height: 20),
+          ],
+
+          // Status breakdown — only statuses that have tasks
+          Text('BY STATUS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5), letterSpacing: 0.8)),
           const SizedBox(height: 8),
           Wrap(
             spacing: 8, runSpacing: 8,
-            children: kStatuses.map((s) => Chip(
-              avatar: Container(width: 10, height: 10, decoration: BoxDecoration(color: statusColor(s), shape: BoxShape.circle)),
-              label: Text('${statusLabel(s)}: ${counts[s] ?? 0}'),
-              backgroundColor: statusColor(s).withValues(alpha: 0.1),
+            children: kStatuses.where((s) => (counts[s] ?? 0) > 0).map((s) => InkWell(
+              onTap: () => setState(() { _statusFilter = s; _tabIndex = 1; }),
+              borderRadius: BorderRadius.circular(20),
+              child: Chip(
+                avatar: Container(width: 10, height: 10, decoration: BoxDecoration(color: statusColor(s), shape: BoxShape.circle)),
+                label: Text('${statusLabel(s)}: ${counts[s]}'),
+                backgroundColor: statusColor(s).withValues(alpha: 0.1),
+              ),
             )).toList(),
           ),
-          const SizedBox(height: 24),
-          Text('Overview Chart', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 8),
-          SizedBox(height: 220, child: InfographicsScreen(allTasks: _tasks, projects: _projects, compact: true)),
-          const SizedBox(height: 12),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton.icon(
-              icon: const Icon(Icons.bar_chart),
-              label: const Text('Full charts'),
-              onPressed: () => setState(() => _tabIndex = 4),
-            ),
-          ),
+          const SizedBox(height: 16),
         ],
       ),
     );
