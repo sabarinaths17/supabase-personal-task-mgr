@@ -2,17 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/task.dart';
+import '../theme/status_colors.dart';
 
 class TaskDetailScreen extends StatefulWidget {
   final Task task;
-  final List<Task> subtasks;
   final SupabaseClient supabase;
   final VoidCallback onChanged;
 
   const TaskDetailScreen({
     super.key,
     required this.task,
-    required this.subtasks,
     required this.supabase,
     required this.onChanged,
   });
@@ -27,6 +26,8 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   bool _previewMode = false;
   DateTime? _dueDate;
   late String _status;
+  List<Task> _subtasks = [];
+  late RealtimeChannel _channel;
 
   @override
   void initState() {
@@ -35,6 +36,32 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     _notesController = TextEditingController(text: widget.task.notes ?? '');
     _dueDate = widget.task.dueDate;
     _status = widget.task.status;
+    _loadSubtasks();
+
+    _channel = widget.supabase.channel('subtasks_of_${widget.task.id}').onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'tasks',
+      callback: (payload) => _loadSubtasks(),
+    ).subscribe();
+  }
+
+  @override
+  void dispose() {
+    widget.supabase.removeChannel(_channel);
+    super.dispose();
+  }
+
+  Future<void> _loadSubtasks() async {
+    final data = await widget.supabase
+        .from('tasks')
+        .select()
+        .eq('parent_task_id', widget.task.id)
+        .order('created_at', ascending: true);
+    if (!mounted) return;
+    setState(() {
+      _subtasks = data.map<Task>((row) => Task.fromMap(row)).toList();
+    });
   }
 
   Future<void> _save() async {
@@ -48,39 +75,64 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     widget.onChanged();
   }
 
-  Future<void> _addSubtask(String title) async {
+  Future<void> _addSubtask(String title, DateTime? dueDate) async {
     await widget.supabase.from('tasks').insert({
       'title': title,
       'user_id': widget.supabase.auth.currentUser!.id,
       'parent_task_id': widget.task.id,
       'project_id': widget.task.projectId,
+      'due_date': dueDate?.toIso8601String().split('T').first,
     });
-    widget.onChanged();
+  }
+
+  Future<void> _toggleSubtask(Task sub, bool done) async {
+    await widget.supabase.from('tasks').update({
+      'status': done ? 'completed' : 'todo',
+      'completed_at': done ? DateTime.now().toIso8601String() : null,
+    }).eq('id', sub.id);
   }
 
   void _showAddSubtaskDialog() {
     final controller = TextEditingController();
+    DateTime? dueDate;
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('New Subtask'),
-        content: TextField(controller: controller, autofocus: true),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () {
-              if (controller.text.trim().isNotEmpty) _addSubtask(controller.text.trim());
-              Navigator.pop(context);
-            },
-            child: const Text('Add'),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('New Subtask'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: controller, autofocus: true, decoration: const InputDecoration(hintText: 'Subtask title')),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                icon: const Icon(Icons.calendar_today, size: 16),
+                label: Text(dueDate == null ? 'Set due date' : '${dueDate!.year}-${dueDate!.month}-${dueDate!.day}'),
+                onPressed: () async {
+                  final picked = await showDatePicker(context: context, initialDate: DateTime.now(), firstDate: DateTime(2020), lastDate: DateTime(2100));
+                  if (picked != null) setDialogState(() => dueDate = picked);
+                },
+              ),
+            ],
           ),
-        ],
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                if (controller.text.trim().isNotEmpty) _addSubtask(controller.text.trim(), dueDate);
+                Navigator.pop(context);
+              },
+              child: const Text('Add'),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final completedCount = _subtasks.where((s) => s.status == 'completed').length;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Task Details'),
@@ -102,8 +154,19 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
             initialValue: _status,
-            decoration: const InputDecoration(labelText: 'Status'),
-            items: kStatuses.map((s) => DropdownMenuItem(value: s, child: Text(statusLabel(s)))).toList(),
+            decoration: InputDecoration(
+              labelText: 'Status',
+              filled: true,
+              fillColor: statusColor(_status).withValues(alpha: 0.15),
+            ),
+            items: kStatuses.map((s) => DropdownMenuItem(
+              value: s,
+              child: Row(children: [
+                Container(width: 10, height: 10, decoration: BoxDecoration(color: statusColor(s), shape: BoxShape.circle)),
+                const SizedBox(width: 8),
+                Text(statusLabel(s)),
+              ]),
+            )).toList(),
             onChanged: (val) => setState(() => _status = val!),
           ),
           const SizedBox(height: 12),
@@ -113,12 +176,7 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
             title: Text(_dueDate == null ? 'No due date' : '${_dueDate!.year}-${_dueDate!.month}-${_dueDate!.day}'),
             trailing: TextButton(
               onPressed: () async {
-                final picked = await showDatePicker(
-                  context: context,
-                  initialDate: _dueDate ?? DateTime.now(),
-                  firstDate: DateTime(2020),
-                  lastDate: DateTime(2100),
-                );
+                final picked = await showDatePicker(context: context, initialDate: _dueDate ?? DateTime.now(), firstDate: DateTime(2020), lastDate: DateTime(2100));
                 if (picked != null) setState(() => _dueDate = picked);
               },
               child: const Text('Change'),
@@ -153,27 +211,59 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Subtasks', style: TextStyle(fontWeight: FontWeight.bold)),
+              Text('Subtasks ($completedCount/${_subtasks.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
               IconButton(icon: const Icon(Icons.add), onPressed: _showAddSubtaskDialog),
             ],
           ),
-          ...widget.subtasks.map((sub) => ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Checkbox(
-                  value: sub.status == 'completed',
-                  onChanged: (val) async {
-                    await widget.supabase.from('tasks').update({
-                      'status': val == true ? 'completed' : 'todo',
-                      'completed_at': val == true ? DateTime.now().toIso8601String() : null,
-                    }).eq('id', sub.id);
-                    widget.onChanged();
-                  },
+          ..._subtasks.map((sub) => Card(
+                margin: const EdgeInsets.only(top: 6),
+                child: ListTile(
+                  leading: _HoverCheckbox(
+                    value: sub.status == 'completed',
+                    onChanged: (val) => _toggleSubtask(sub, val),
+                  ),
+                  title: Text(sub.title, style: sub.status == 'completed' ? const TextStyle(decoration: TextDecoration.lineThrough) : null),
+                  subtitle: Text([
+                    statusLabel(sub.status),
+                    if (sub.dueDate != null) '${sub.dueDate!.year}-${sub.dueDate!.month}-${sub.dueDate!.day}',
+                  ].join(' · ')),
                 ),
-                title: Text(sub.title, style: sub.status == 'completed' ? const TextStyle(decoration: TextDecoration.lineThrough) : null),
-                subtitle: Text(statusLabel(sub.status)),
               )),
           const SizedBox(height: 40),
         ],
+      ),
+    );
+  }
+}
+
+class _HoverCheckbox extends StatefulWidget {
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  const _HoverCheckbox({required this.value, required this.onChanged});
+
+  @override
+  State<_HoverCheckbox> createState() => _HoverCheckboxState();
+}
+
+class _HoverCheckboxState extends State<_HoverCheckbox> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        decoration: BoxDecoration(
+          color: _hovering ? Colors.green.withValues(alpha: 0.15) : Colors.transparent,
+          shape: BoxShape.circle,
+        ),
+        child: Checkbox(
+          value: widget.value,
+          activeColor: Colors.green,
+          onChanged: (val) => widget.onChanged(val ?? false),
+        ),
       ),
     );
   }

@@ -4,6 +4,7 @@ class Task {
   final String? notes;
   final DateTime? dueDate;
   final String status;
+  final String priority;
   final String? waitingForNote;
   final String? projectId;
   final String? parentTaskId;
@@ -16,6 +17,7 @@ class Task {
     this.notes,
     this.dueDate,
     required this.status,
+    this.priority = 'medium',
     this.waitingForNote,
     this.projectId,
     this.parentTaskId,
@@ -32,6 +34,7 @@ class Task {
       notes: map['notes'],
       dueDate: map['due_date'] != null ? DateTime.parse(map['due_date']) : null,
       status: map['status'] ?? 'todo',
+      priority: map['priority'] ?? 'medium',
       waitingForNote: map['waiting_for_note'],
       projectId: map['project_id'],
       parentTaskId: map['parent_task_id'],
@@ -42,16 +45,11 @@ class Task {
 }
 
 const List<String> kStatuses = [
-  'todo',
-  'wip',
-  'pending',
-  'lazy',
-  'never_gonna_happen',
-  'idk',
-  'cancelled',
-  'completed',
-  'waiting_for',
+  'todo', 'wip', 'pending', 'lazy', 'never_gonna_happen',
+  'idk', 'cancelled', 'completed', 'waiting_for',
 ];
+
+const List<String> kPriorities = ['low', 'medium', 'high'];
 
 String statusLabel(String status) {
   switch (status) {
