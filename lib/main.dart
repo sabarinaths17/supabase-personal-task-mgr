@@ -154,6 +154,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _taskGridView = false;
   bool _projectGridView = false;
   bool _showSubtasksOnlyToday = false;
+  int? _previousTabIndex;
 
   @override
   void initState() {
@@ -678,7 +679,7 @@ class _HomeScreenState extends State<HomeScreen> {
       margin: const EdgeInsets.only(right: 10),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: color.withValues(alpha: 0.35))),
       child: InkWell(
-        onTap: () => setState(() { _tabIndex = 3; }),
+        onTap: () => setState(() { _previousTabIndex = 0; _tabIndex = 3; }),
         borderRadius: BorderRadius.circular(10),
         child: Container(
           width: 140,
@@ -726,10 +727,11 @@ class _HomeScreenState extends State<HomeScreen> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
             decoration: BoxDecoration(
-              gradient: LinearGradient(colors: [
-                Theme.of(context).colorScheme.primary.withValues(alpha: 0.9),
-                Theme.of(context).colorScheme.secondary.withValues(alpha: 0.9),
-              ]),
+              gradient: const LinearGradient(
+                colors: [Color(0xFF4338CA), Color(0xFF7C3AED)],
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+              ),
               borderRadius: BorderRadius.circular(14),
             ),
             child: Column(
@@ -797,7 +799,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Wrap(
             spacing: 8, runSpacing: 8,
             children: kStatuses.where((s) => (counts[s] ?? 0) > 0).map((s) => InkWell(
-              onTap: () => setState(() { _statusFilter = s; _tabIndex = 1; }),
+              onTap: () => setState(() { _previousTabIndex = 0; _statusFilter = s; _tabIndex = 1; }),
               borderRadius: BorderRadius.circular(20),
               child: Chip(
                 avatar: Container(width: 10, height: 10, decoration: BoxDecoration(color: statusColor(s), shape: BoxShape.circle)),
@@ -972,6 +974,17 @@ class _HomeScreenState extends State<HomeScreen> {
     ];
     return Scaffold(
       appBar: AppBar(
+        leading: _previousTabIndex != null
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => setState(() {
+                _tabIndex = _previousTabIndex!;
+                _previousTabIndex = null;
+                _statusFilter = null;
+                _showSubtasksOnlyToday = false;
+              }),
+            )
+          : null,
         title: const Text('Task Manager'),
         actions: [
           PopupMenuButton<AppThemeMode>(
@@ -997,7 +1010,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
-        onDestinationSelected: (i) => setState(() { _tabIndex = i; _showSubtasksOnlyToday = false; }),
+        onDestinationSelected: (i) => setState(() { _tabIndex = i; _showSubtasksOnlyToday = false; _previousTabIndex = null; }),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.dashboard), label: 'Dashboard'),
           NavigationDestination(icon: Icon(Icons.list), label: 'Tasks'),
