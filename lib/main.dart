@@ -13,7 +13,7 @@ Future<void> main() async {
 
   await Supabase.initialize(
     url: 'https://pwbixytthehwqelhgqdo.supabase.co',
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3Yml4eXR0aGVod3FlbGhncWRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyMzA5NTcsImV4cCI6MjA5ODgwNjk1N30.woumFD3vG_JRJOlnb_h3fUAxEUyY8mMIgZ8ZBABR4n0',
+    publishableKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3Yml4eXR0aGVod3FlbGhncWRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyMzA5NTcsImV4cCI6MjA5ODgwNjk1N30.woumFD3vG_JRJOlnb_h3fUAxEUyY8mMIgZ8ZBABR4n0',
   );
 
   runApp(const MyApp());
@@ -156,24 +156,34 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _showSubtasksOnlyToday = false;
   int? _previousTabIndex;
 
+  late final RealtimeChannel _tasksChannel;
+  late final RealtimeChannel _projectsChannel;
+
   @override
   void initState() {
     super.initState();
     _loadAll();
 
-    supabase.channel('public:tasks').onPostgresChanges(
+    _tasksChannel = supabase.channel('public:tasks').onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
       table: 'tasks',
       callback: (payload) => _loadAll(),
     ).subscribe();
 
-    supabase.channel('public:projects').onPostgresChanges(
+    _projectsChannel = supabase.channel('public:projects').onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
       table: 'projects',
       callback: (payload) => _loadAll(),
     ).subscribe();
+  }
+
+  @override
+  void dispose() {
+    supabase.removeChannel(_tasksChannel);
+    supabase.removeChannel(_projectsChannel);
+    super.dispose();
   }
 
   Future<void> _loadAll() async {
@@ -669,39 +679,22 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _projectHealthCard(Project p) {
-    final done = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null && t.status == 'completed').length;
-    final total = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null).length;
-    final active = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null && !t.isTerminal).length;
-    final progress = total == 0 ? 0.0 : done / total;
-    final color = priorityColor(p.priority);
-    return Card(
-      margin: const EdgeInsets.only(right: 10),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: color.withValues(alpha: 0.35))),
-      child: InkWell(
-        onTap: () => setState(() { _previousTabIndex = 0; _tabIndex = 3; }),
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          width: 140,
-          padding: const EdgeInsets.all(10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(children: [
-                _priorityDot(p.priority),
-                const SizedBox(width: 5),
-                Expanded(child: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12), maxLines: 1, overflow: TextOverflow.ellipsis)),
-              ]),
-              const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(value: progress, minHeight: 5, backgroundColor: Colors.grey.withValues(alpha: 0.15), valueColor: AlwaysStoppedAnimation(color)),
-              ),
-              const SizedBox(height: 5),
-              Text('$active active · $done/$total done', style: const TextStyle(fontSize: 10, color: Colors.grey)),
-            ],
-          ),
+  Widget _dashProjectRow(Project p) {
+    final count = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null).length;
+    return InkWell(
+      onTap: () => setState(() { _previousTabIndex = 0; _tabIndex = 3; }),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            _priorityDot(p.priority),
+            const SizedBox(width: 8),
+            Expanded(child: Text(p.name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis)),
+            Text('$count tasks', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+            const SizedBox(width: 4),
+            const Icon(Icons.chevron_right, size: 16, color: Colors.grey),
+          ],
         ),
       ),
     );
@@ -784,13 +777,21 @@ class _HomeScreenState extends State<HomeScreen> {
 
           // Projects
           if (_projects.isNotEmpty) ...[
-            Text('PROJECTS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5), letterSpacing: 0.8)),
-            const SizedBox(height: 8),
-            SizedBox(
-              height: 90,
-              child: ListView(scrollDirection: Axis.horizontal, children: _projects.map(_projectHealthCard).toList()),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('PROJECTS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5), letterSpacing: 0.8)),
+                if (_projects.length > 5)
+                  TextButton(
+                    style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    onPressed: () => setState(() { _previousTabIndex = 0; _tabIndex = 3; }),
+                    child: const Text('Go to projects', style: TextStyle(fontSize: 12)),
+                  ),
+              ],
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 4),
+            ..._projects.take(5).map(_dashProjectRow),
+            const SizedBox(height: 16),
           ],
 
           // Status breakdown — only statuses that have tasks
@@ -878,9 +879,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  DateTime _dayKey(DateTime d) => DateTime(d.year, d.month, d.day);
+
   Widget _buildCalendar() {
-    final dayKey = (DateTime d) => DateTime(d.year, d.month, d.day);
-    final tasksForDay = _tasks.where((t) => t.dueDate != null && t.parentTaskId == null && dayKey(t.dueDate!) == dayKey(_selectedDay)).toList();
+    final tasksForDay = _tasks.where((t) => t.dueDate != null && t.parentTaskId == null && _dayKey(t.dueDate!) == _dayKey(_selectedDay)).toList();
 
     return Column(
       children: [
@@ -888,9 +890,9 @@ class _HomeScreenState extends State<HomeScreen> {
           firstDay: DateTime(2020),
           lastDay: DateTime(2100),
           focusedDay: _focusedDay,
-          selectedDayPredicate: (day) => dayKey(day) == dayKey(_selectedDay),
+          selectedDayPredicate: (day) => _dayKey(day) == _dayKey(_selectedDay),
           onDaySelected: (selected, focused) => setState(() { _selectedDay = selected; _focusedDay = focused; }),
-          eventLoader: (day) => _tasks.where((t) => t.dueDate != null && t.parentTaskId == null && dayKey(t.dueDate!) == dayKey(day)).toList(),
+          eventLoader: (day) => _tasks.where((t) => t.dueDate != null && t.parentTaskId == null && _dayKey(t.dueDate!) == _dayKey(day)).toList(),
           calendarFormat: CalendarFormat.month,
         ),
         const Divider(),
@@ -1001,6 +1003,10 @@ class _HomeScreenState extends State<HomeScreen> {
           context: context,
           builder: (context) => SafeArea(
             child: Wrap(children: [
+              ListTile(
+                title: const Text('Add', style: TextStyle(fontWeight: FontWeight.bold)),
+                trailing: IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+              ),
               ListTile(leading: const Icon(Icons.task), title: const Text('Add Task'), onTap: () { Navigator.pop(context); _showAddTaskDialog(); }),
               ListTile(leading: const Icon(Icons.folder), title: const Text('Add Project'), onTap: () { Navigator.pop(context); _showAddProjectDialog(); }),
             ]),
