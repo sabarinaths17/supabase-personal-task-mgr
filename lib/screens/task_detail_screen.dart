@@ -64,32 +64,54 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     });
   }
 
-  Future<void> _save() async {
-    await widget.supabase.from('tasks').update({
+  /// Surfaces a write failure (e.g. a silently-rejecting RLS policy) as a
+  /// SnackBar instead of letting it fail invisibly.
+  Future<bool> _mutate(Future<void> Function() action) async {
+    try {
+      await action();
+      return true;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<bool> _save() async {
+    final ok = await _mutate(() => widget.supabase.from('tasks').update({
       'title': _titleController.text.trim(),
       'notes': _notesController.text,
       'due_date': _dueDate?.toIso8601String().split('T').first,
       'status': _status,
       'completed_at': _status == 'completed' ? DateTime.now().toIso8601String() : null,
-    }).eq('id', widget.task.id);
-    widget.onChanged();
+    }).eq('id', widget.task.id));
+    if (ok) widget.onChanged();
+    return ok;
   }
 
-  Future<void> _addSubtask(String title, DateTime? dueDate) async {
-    await widget.supabase.from('tasks').insert({
+  Future<void> _saveAndClose() async {
+    final ok = await _save();
+    if (ok && mounted) Navigator.pop(context);
+  }
+
+  Future<void> _addSubtask(String title, DateTime? dueDate) {
+    return _mutate(() => widget.supabase.from('tasks').insert({
       'title': title,
       'user_id': widget.supabase.auth.currentUser!.id,
       'parent_task_id': widget.task.id,
       'project_id': widget.task.projectId,
       'due_date': dueDate?.toIso8601String().split('T').first,
-    });
+    })).then((_) => _loadSubtasks());
   }
 
-  Future<void> _toggleSubtask(Task sub, bool done) async {
-    await widget.supabase.from('tasks').update({
+  Future<void> _toggleSubtask(Task sub, bool done) {
+    return _mutate(() => widget.supabase.from('tasks').update({
       'status': done ? 'completed' : 'todo',
       'completed_at': done ? DateTime.now().toIso8601String() : null,
-    }).eq('id', sub.id);
+    }).eq('id', sub.id)).then((_) => _loadSubtasks());
   }
 
   void _showAddSubtaskDialog() {
@@ -132,22 +154,20 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final completedCount = _subtasks.where((s) => s.status == 'completed').length;
+    final completedCount = _subtasks.where((s) => s.isTerminal).length;
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.pop(context),
+          tooltip: 'Save & close',
+          onPressed: _saveAndClose,
         ),
         title: const Text('Task Details'),
         actions: [
           IconButton(
             icon: const Icon(Icons.check),
             tooltip: 'Save',
-            onPressed: () async {
-              await _save();
-              if (context.mounted) Navigator.pop(context);
-            },
+            onPressed: _saveAndClose,
           ),
         ],
       ),
@@ -227,10 +247,10 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
                 margin: const EdgeInsets.only(top: 6),
                 child: ListTile(
                   leading: _HoverCheckbox(
-                    value: sub.status == 'completed',
+                    value: sub.isTerminal,
                     onChanged: (val) => _toggleSubtask(sub, val),
                   ),
-                  title: Text(sub.title, style: sub.status == 'completed' ? const TextStyle(decoration: TextDecoration.lineThrough) : null),
+                  title: Text(sub.title, style: sub.isTerminal ? const TextStyle(decoration: TextDecoration.lineThrough) : null),
                   subtitle: Text([
                     statusLabel(sub.status),
                     if (sub.dueDate != null) '${sub.dueDate!.year}-${sub.dueDate!.month}-${sub.dueDate!.day}',

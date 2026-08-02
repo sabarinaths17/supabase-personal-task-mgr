@@ -148,6 +148,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Project> _projects = [];
   bool _loading = true;
   String? _statusFilter;
+  String? _dueFilter; // 'overdue' | 'today' | 'upcoming' | null
   int _tabIndex = 0;
   DateTime _selectedDay = DateTime.now();
   DateTime _focusedDay = DateTime.now();
@@ -197,31 +198,49 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  Future<void> _addTask(String title, {String? projectId, DateTime? dueDate, String priority = 'medium'}) async {
-    await supabase.from('tasks').insert({
+  /// Runs a Supabase write, surfaces any failure (e.g. an RLS policy silently
+  /// rejecting the row) as a SnackBar instead of failing invisibly, and
+  /// reloads immediately rather than waiting on the realtime subscription.
+  Future<bool> _mutate(Future<void> Function() action) async {
+    try {
+      await action();
+      await _loadAll();
+      return true;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<void> _addTask(String title, {String? projectId, DateTime? dueDate, String priority = 'medium'}) {
+    return _mutate(() => supabase.from('tasks').insert({
       'title': title,
       'user_id': supabase.auth.currentUser!.id,
       'project_id': projectId,
       'due_date': dueDate?.toIso8601String().split('T').first,
       'priority': priority,
-    });
+    }));
   }
 
   Future<void> _toggleComplete(Task task, bool done) async {
-    await supabase.from('tasks').update({
+    final ok = await _mutate(() => supabase.from('tasks').update({
       'status': done ? 'completed' : 'todo',
       'completed_at': done ? DateTime.now().toIso8601String() : null,
-    }).eq('id', task.id);
-    if (done && mounted) _showCompletionAnimation();
+    }).eq('id', task.id));
+    if (ok && done && mounted) _showCompletionAnimation();
   }
 
   Future<void> _updateStatus(Task task, String newStatus, {String? waitingNote}) async {
-    await supabase.from('tasks').update({
+    final ok = await _mutate(() => supabase.from('tasks').update({
       'status': newStatus,
       'waiting_for_note': newStatus == 'waiting_for' ? waitingNote : null,
       'completed_at': newStatus == 'completed' ? DateTime.now().toIso8601String() : null,
-    }).eq('id', task.id);
-    if (newStatus == 'completed' && mounted) _showCompletionAnimation();
+    }).eq('id', task.id));
+    if (ok && newStatus == 'completed' && mounted) _showCompletionAnimation();
   }
 
   void _showCompletionAnimation() {
@@ -233,13 +252,13 @@ class _HomeScreenState extends State<HomeScreen> {
     overlay.insert(entry);
   }
 
-  Future<void> _addProject(String name, {DateTime? dueDate, String priority = 'medium'}) async {
-    await supabase.from('projects').insert({
+  Future<void> _addProject(String name, {DateTime? dueDate, String priority = 'medium'}) {
+    return _mutate(() => supabase.from('projects').insert({
       'name': name,
       'user_id': supabase.auth.currentUser!.id,
       'due_date': dueDate?.toIso8601String().split('T').first,
       'priority': priority,
-    });
+    }));
   }
 
   void _openTaskDetail(Task task) {
@@ -422,14 +441,43 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Task> get _completedSection => _tasks.where((t) => t.isTerminal && t.parentTaskId == null).toList();
 
   int _subtaskCountFor(String taskId) => _tasks.where((t) => t.parentTaskId == taskId).length;
-  int _subtaskCompletedCountFor(String taskId) => _tasks.where((t) => t.parentTaskId == taskId && t.status == 'completed').length;
+  int _subtaskCompletedCountFor(String taskId) => _tasks.where((t) => t.parentTaskId == taskId && t.isTerminal).length;
 
   List<Task> get _filteredActiveTasks {
-    if (_statusFilter == null) return _activeTasks;
-    if (_statusFilter == 'completed' || _statusFilter == 'cancelled') {
-      return _completedSection.where((t) => t.status == _statusFilter).toList();
+    List<Task> list;
+    if (_statusFilter == null) {
+      list = _activeTasks;
+    } else if (_statusFilter == 'completed' || _statusFilter == 'cancelled') {
+      list = _completedSection.where((t) => t.status == _statusFilter).toList();
+    } else {
+      list = _activeTasks.where((t) => t.status == _statusFilter).toList();
     }
-    return _activeTasks.where((t) => t.status == _statusFilter).toList();
+    if (_dueFilter != null) {
+      final ids = switch (_dueFilter) {
+        'overdue' => _overdueTasks.map((t) => t.id).toSet(),
+        'today' => _tasksDueToday.map((t) => t.id).toSet(),
+        'upcoming' => _upcomingTasks.map((t) => t.id).toSet(),
+        _ => <String>{},
+      };
+      list = list.where((t) => ids.contains(t.id)).toList();
+    }
+    return list;
+  }
+
+  String? get _dueFilterLabel => switch (_dueFilter) {
+    'overdue' => 'Overdue',
+    'today' => 'Due today',
+    'upcoming' => 'Upcoming (7 days)',
+    _ => null,
+  };
+
+  void _goToTasks({String? status, String? due}) {
+    setState(() {
+      _previousTabIndex = 0;
+      _statusFilter = status;
+      _dueFilter = due;
+      _tabIndex = 1;
+    });
   }
 
   List<Task> get _tasksDueToday {
@@ -494,12 +542,12 @@ class _HomeScreenState extends State<HomeScreen> {
         side: BorderSide(color: statusColor(task.status).withValues(alpha: 0.5), width: 1.5),
       ),
       child: ListTile(
-        leading: _HoverCheckbox(value: task.status == 'completed', onChanged: (val) => _toggleComplete(task, val)),
+        leading: _HoverCheckbox(value: task.isTerminal, onChanged: (val) => _toggleComplete(task, val)),
         title: Row(
           children: [
             _priorityDot(task.priority),
             const SizedBox(width: 6),
-            Expanded(child: Text(task.title, style: task.status == 'completed' ? const TextStyle(decoration: TextDecoration.lineThrough) : null)),
+            Expanded(child: Text(task.title, style: task.isTerminal ? const TextStyle(decoration: TextDecoration.lineThrough) : null)),
           ],
         ),
         subtitle: Wrap(
@@ -544,7 +592,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       task.title,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, decoration: task.status == 'completed' ? TextDecoration.lineThrough : null),
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, decoration: task.isTerminal ? TextDecoration.lineThrough : null),
                     ),
                   ),
                 ],
@@ -588,8 +636,8 @@ class _HomeScreenState extends State<HomeScreen> {
     return '${months[d.month - 1]} ${d.day}';
   }
 
-  Widget _quickPill(String label, Color color, IconData icon) {
-    return Container(
+  Widget _quickPill(String label, Color color, IconData icon, {VoidCallback? onTap}) {
+    final pill = Container(
       margin: const EdgeInsets.only(right: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20), border: Border.all(color: color.withValues(alpha: 0.3))),
@@ -602,17 +650,24 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
+    if (onTap == null) return pill;
+    return InkWell(onTap: onTap, borderRadius: BorderRadius.circular(20), child: pill);
   }
 
-  Widget _dashSection(String title, IconData icon, Color color, List<Widget> children) {
+  Widget _dashSection(String title, IconData icon, Color color, List<Widget> children, {VoidCallback? onTap}) {
+    final header = Row(children: [
+      Icon(icon, size: 14, color: color),
+      const SizedBox(width: 5),
+      Text(title, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: color, letterSpacing: 0.8)),
+      if (onTap != null) ...[
+        const Spacer(),
+        Icon(Icons.chevron_right, size: 16, color: color),
+      ],
+    ]);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(children: [
-          Icon(icon, size: 14, color: color),
-          const SizedBox(width: 5),
-          Text(title, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: color, letterSpacing: 0.8)),
-        ]),
+        onTap == null ? header : InkWell(onTap: onTap, borderRadius: BorderRadius.circular(6), child: header),
         const SizedBox(height: 6),
         Container(
           decoration: BoxDecoration(border: Border(left: BorderSide(color: color.withValues(alpha: 0.35), width: 2))),
@@ -639,7 +694,7 @@ class _HomeScreenState extends State<HomeScreen> {
             SizedBox(
               width: 32,
               height: 32,
-              child: _HoverCheckbox(value: task.status == 'completed', onChanged: (val) => _toggleComplete(task, val)),
+              child: _HoverCheckbox(value: task.isTerminal, onChanged: (val) => _toggleComplete(task, val)),
             ),
             const SizedBox(width: 4),
             Expanded(
@@ -682,7 +737,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _dashProjectRow(Project p) {
     final count = _tasks.where((t) => t.projectId == p.id && t.parentTaskId == null).length;
     return InkWell(
-      onTap: () => setState(() { _previousTabIndex = 0; _tabIndex = 3; }),
+      onTap: () => setState(() { _previousTabIndex = 0; _statusFilter = null; _dueFilter = null; _tabIndex = 3; }),
       borderRadius: BorderRadius.circular(6),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
@@ -742,11 +797,11 @@ class _HomeScreenState extends State<HomeScreen> {
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(children: [
-              if (overdue.isNotEmpty) _quickPill('${overdue.length} overdue', const Color(0xFFE55555), Icons.warning_rounded),
-              _quickPill('${today.length} today', const Color(0xFF5B8DEF), Icons.today),
-              _quickPill('$_completedToday done', const Color(0xFF4CAF50), Icons.check_circle_outline),
-              _quickPill('${_wipTasks.length} WIP', const Color(0xFFF5A623), Icons.bolt),
-              _quickPill('${_activeTasks.length} active', Colors.grey, Icons.list_alt),
+              if (overdue.isNotEmpty) _quickPill('${overdue.length} overdue', const Color(0xFFE55555), Icons.warning_rounded, onTap: () => _goToTasks(due: 'overdue')),
+              _quickPill('${today.length} today', const Color(0xFF5B8DEF), Icons.today, onTap: () => _goToTasks(due: 'today')),
+              _quickPill('$_completedToday done', const Color(0xFF4CAF50), Icons.check_circle_outline, onTap: () => _goToTasks(status: 'completed')),
+              _quickPill('${_wipTasks.length} WIP', const Color(0xFFF5A623), Icons.bolt, onTap: () => _goToTasks(status: 'wip')),
+              _quickPill('${_activeTasks.length} active', Colors.grey, Icons.list_alt, onTap: () => _goToTasks()),
             ]),
           ),
           const SizedBox(height: 22),
@@ -754,7 +809,8 @@ class _HomeScreenState extends State<HomeScreen> {
           // Overdue
           if (overdue.isNotEmpty)
             _dashSection('OVERDUE', Icons.warning_rounded, const Color(0xFFE55555),
-              overdue.map((t) => _dashTaskRow(t, accentColor: const Color(0xFFE55555))).toList()),
+              overdue.map((t) => _dashTaskRow(t, accentColor: const Color(0xFFE55555))).toList(),
+              onTap: () => _goToTasks(due: 'overdue')),
 
           // Today
           _dashSection('TODAY', Icons.today, const Color(0xFF5B8DEF),
@@ -763,17 +819,20 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: const EdgeInsets.symmetric(vertical: 6),
                   child: Text('Nothing due today — you\'re clear.', style: TextStyle(fontSize: 13, color: Colors.grey.shade500)),
                 )]
-              : today.map((t) => _dashTaskRow(t)).toList()),
+              : today.map((t) => _dashTaskRow(t)).toList(),
+            onTap: today.isEmpty ? null : () => _goToTasks(due: 'today')),
 
           // WIP not already in today
           if (wipNotToday.isNotEmpty)
             _dashSection('IN PROGRESS', Icons.bolt, const Color(0xFFF5A623),
-              wipNotToday.map((t) => _dashTaskRow(t, accentColor: const Color(0xFFF5A623))).toList()),
+              wipNotToday.map((t) => _dashTaskRow(t, accentColor: const Color(0xFFF5A623))).toList(),
+              onTap: () => _goToTasks(status: 'wip')),
 
           // Upcoming
           if (upcoming.isNotEmpty)
             _dashSection('UPCOMING — next 7 days', Icons.event, const Color(0xFF8B6DD1),
-              upcoming.map((t) => _dashTaskRow(t, accentColor: const Color(0xFF8B6DD1))).toList()),
+              upcoming.map((t) => _dashTaskRow(t, accentColor: const Color(0xFF8B6DD1))).toList(),
+              onTap: () => _goToTasks(due: 'upcoming')),
 
           // Projects
           if (_projects.isNotEmpty) ...[
@@ -800,7 +859,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Wrap(
             spacing: 8, runSpacing: 8,
             children: kStatuses.where((s) => (counts[s] ?? 0) > 0).map((s) => InkWell(
-              onTap: () => setState(() { _previousTabIndex = 0; _statusFilter = s; _tabIndex = 1; }),
+              onTap: () => _goToTasks(status: s),
               borderRadius: BorderRadius.circular(20),
               child: Chip(
                 avatar: Container(width: 10, height: 10, decoration: BoxDecoration(color: statusColor(s), shape: BoxShape.circle)),
@@ -834,6 +893,23 @@ class _HomeScreenState extends State<HomeScreen> {
     final completed = _completedSection;
     return Column(
       children: [
+        if (_dueFilterLabel != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: Row(
+              children: [
+                Icon(Icons.filter_alt, size: 14, color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 6),
+                Text('Filtered: $_dueFilterLabel', style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                TextButton(
+                  style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                  onPressed: () => setState(() => _dueFilter = null),
+                  child: const Text('Clear', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
         Row(
           children: [
             Expanded(
@@ -843,7 +919,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   scrollDirection: Axis.horizontal,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   children: [
-                    Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: ChoiceChip(label: const Text('All'), selected: _statusFilter == null, onSelected: (_) => setState(() => _statusFilter = null))),
+                    Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: ChoiceChip(label: const Text('All'), selected: _statusFilter == null && _dueFilter == null, onSelected: (_) => setState(() { _statusFilter = null; _dueFilter = null; }))),
                     ...kStatuses.map((s) => Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 4),
                           child: ChoiceChip(
@@ -983,6 +1059,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 _tabIndex = _previousTabIndex!;
                 _previousTabIndex = null;
                 _statusFilter = null;
+                _dueFilter = null;
                 _showSubtasksOnlyToday = false;
               }),
             )
@@ -1016,7 +1093,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
-        onDestinationSelected: (i) => setState(() { _tabIndex = i; _showSubtasksOnlyToday = false; _previousTabIndex = null; }),
+        onDestinationSelected: (i) => setState(() { _tabIndex = i; _showSubtasksOnlyToday = false; _previousTabIndex = null; _dueFilter = null; }),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.dashboard), label: 'Dashboard'),
           NavigationDestination(icon: Icon(Icons.list), label: 'Tasks'),
