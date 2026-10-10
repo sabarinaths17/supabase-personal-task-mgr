@@ -4,6 +4,9 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/task.dart';
 import '../theme/status_colors.dart';
 
+String _dateStr(DateTime d) =>
+    '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
 class TaskDetailScreen extends StatefulWidget {
   final Task task;
   final SupabaseClient supabase;
@@ -23,6 +26,7 @@ class TaskDetailScreen extends StatefulWidget {
 class _TaskDetailScreenState extends State<TaskDetailScreen> {
   late TextEditingController _titleController;
   late TextEditingController _notesController;
+  late TextEditingController _waitingForNoteController;
   bool _previewMode = false;
   DateTime? _dueDate;
   late String _status;
@@ -34,6 +38,7 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     super.initState();
     _titleController = TextEditingController(text: widget.task.title);
     _notesController = TextEditingController(text: widget.task.notes ?? '');
+    _waitingForNoteController = TextEditingController(text: widget.task.waitingForNote ?? '');
     _dueDate = widget.task.dueDate;
     _status = widget.task.status;
     _loadSubtasks();
@@ -48,6 +53,9 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
 
   @override
   void dispose() {
+    _titleController.dispose();
+    _notesController.dispose();
+    _waitingForNoteController.dispose();
     widget.supabase.removeChannel(_channel);
     super.dispose();
   }
@@ -59,13 +67,9 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
         .eq('parent_task_id', widget.task.id)
         .order('created_at', ascending: true);
     if (!mounted) return;
-    setState(() {
-      _subtasks = data.map<Task>((row) => Task.fromMap(row)).toList();
-    });
+    setState(() => _subtasks = data.map<Task>((row) => Task.fromMap(row)).toList());
   }
 
-  /// Surfaces a write failure (e.g. a silently-rejecting RLS policy) as a
-  /// SnackBar instead of letting it fail invisibly.
   Future<bool> _mutate(Future<void> Function() action) async {
     try {
       await action();
@@ -86,6 +90,7 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
       'notes': _notesController.text,
       'due_date': _dueDate?.toIso8601String().split('T').first,
       'status': _status,
+      'waiting_for_note': _status == 'waiting_for' ? _waitingForNoteController.text : null,
       'completed_at': _status == 'completed' ? DateTime.now().toIso8601String() : null,
     }).eq('id', widget.task.id));
     if (ok) widget.onChanged();
@@ -95,6 +100,34 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   Future<void> _saveAndClose() async {
     final ok = await _save();
     if (ok && mounted) Navigator.pop(context);
+  }
+
+  Future<void> _confirmDelete() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete task?'),
+        content: Text('Delete "${widget.task.title}"? Its subtasks will also be removed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      final deleted = await _mutate(() async {
+        await widget.supabase.from('tasks').delete().eq('parent_task_id', widget.task.id);
+        await widget.supabase.from('tasks').delete().eq('id', widget.task.id);
+      });
+      if (deleted && mounted) {
+        widget.onChanged();
+        Navigator.pop(context);
+      }
+    }
   }
 
   Future<void> _addSubtask(String title, DateTime? dueDate) {
@@ -114,29 +147,98 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     }).eq('id', sub.id)).then((_) => _loadSubtasks());
   }
 
+  void _editSubtask(Task sub) {
+    final titleCtrl = TextEditingController(text: sub.title);
+    String status = sub.status;
+    DateTime? dueDate = sub.dueDate;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDs) => AlertDialog(
+          title: const Text('Edit Subtask'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: titleCtrl,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Title', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              value: status,
+              decoration: const InputDecoration(labelText: 'Status', border: OutlineInputBorder()),
+              items: kStatuses.map((s) => DropdownMenuItem(
+                value: s,
+                child: Row(children: [
+                  Container(width: 10, height: 10, decoration: BoxDecoration(color: statusColor(s), shape: BoxShape.circle)),
+                  const SizedBox(width: 8),
+                  Text(statusLabel(s)),
+                ]),
+              )).toList(),
+              onChanged: (v) => setDs(() => status = v!),
+            ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              icon: const Icon(Icons.calendar_today, size: 16),
+              label: Text(dueDate == null ? 'Set due date' : _dateStr(dueDate!)),
+              onPressed: () async {
+                final picked = await showDatePicker(context: ctx, initialDate: dueDate ?? DateTime.now(), firstDate: DateTime(2020), lastDate: DateTime(2100));
+                if (picked != null) setDs(() => dueDate = picked);
+              },
+            ),
+          ]),
+          actions: [
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              onPressed: () async {
+                Navigator.pop(ctx);
+                await _mutate(() => widget.supabase.from('tasks').delete().eq('id', sub.id));
+                _loadSubtasks();
+              },
+              child: const Text('Delete'),
+            ),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () async {
+                final title = titleCtrl.text.trim();
+                if (title.isEmpty) return;
+                Navigator.pop(ctx);
+                await _mutate(() => widget.supabase.from('tasks').update({
+                  'title': title,
+                  'status': status,
+                  'due_date': dueDate?.toIso8601String().split('T').first,
+                  'completed_at': status == 'completed' ? DateTime.now().toIso8601String() : null,
+                }).eq('id', sub.id));
+                _loadSubtasks();
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showAddSubtaskDialog() {
     final controller = TextEditingController();
     DateTime? dueDate;
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+        builder: (context, setDs) => AlertDialog(
           title: const Text('New Subtask'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(controller: controller, autofocus: true, decoration: const InputDecoration(hintText: 'Subtask title')),
-              const SizedBox(height: 8),
-              TextButton.icon(
-                icon: const Icon(Icons.calendar_today, size: 16),
-                label: Text(dueDate == null ? 'Set due date' : '${dueDate!.year}-${dueDate!.month}-${dueDate!.day}'),
-                onPressed: () async {
-                  final picked = await showDatePicker(context: context, initialDate: DateTime.now(), firstDate: DateTime(2020), lastDate: DateTime(2100));
-                  if (picked != null) setDialogState(() => dueDate = picked);
-                },
-              ),
-            ],
-          ),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: controller, autofocus: true, decoration: const InputDecoration(hintText: 'Subtask title')),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              icon: const Icon(Icons.calendar_today, size: 16),
+              label: Text(dueDate == null ? 'Set due date' : _dateStr(dueDate!)),
+              onPressed: () async {
+                final picked = await showDatePicker(context: context, initialDate: DateTime.now(), firstDate: DateTime(2020), lastDate: DateTime(2100));
+                if (picked != null) setDs(() => dueDate = picked);
+              },
+            ),
+          ]),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
             FilledButton(
@@ -165,6 +267,11 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
         title: const Text('Task Details'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: 'Delete task',
+            onPressed: _confirmDelete,
+          ),
+          IconButton(
             icon: const Icon(Icons.check),
             tooltip: 'Save',
             onPressed: _saveAndClose,
@@ -181,11 +288,12 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
-            initialValue: _status,
+            value: _status,
             decoration: InputDecoration(
               labelText: 'Status',
               filled: true,
               fillColor: statusColor(_status).withValues(alpha: 0.15),
+              border: const OutlineInputBorder(),
             ),
             items: kStatuses.map((s) => DropdownMenuItem(
               value: s,
@@ -197,31 +305,46 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
             )).toList(),
             onChanged: (val) => setState(() => _status = val!),
           ),
+          if (_status == 'waiting_for') ...[
+            const SizedBox(height: 10),
+            TextField(
+              controller: _waitingForNoteController,
+              decoration: const InputDecoration(
+                labelText: 'Waiting for...',
+                prefixIcon: Icon(Icons.hourglass_empty, size: 18),
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.calendar_today),
-            title: Text(_dueDate == null ? 'No due date' : '${_dueDate!.year}-${_dueDate!.month}-${_dueDate!.day}'),
-            trailing: TextButton(
-              onPressed: () async {
-                final picked = await showDatePicker(context: context, initialDate: _dueDate ?? DateTime.now(), firstDate: DateTime(2020), lastDate: DateTime(2100));
-                if (picked != null) setState(() => _dueDate = picked);
-              },
-              child: const Text('Change'),
-            ),
+            title: Text(_dueDate == null ? 'No due date' : _dateStr(_dueDate!)),
+            trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+              TextButton(
+                onPressed: () async {
+                  final picked = await showDatePicker(context: context, initialDate: _dueDate ?? DateTime.now(), firstDate: DateTime(2020), lastDate: DateTime(2100));
+                  if (picked != null) setState(() => _dueDate = picked);
+                },
+                child: const Text('Change'),
+              ),
+              if (_dueDate != null)
+                TextButton(
+                  onPressed: () => setState(() => _dueDate = null),
+                  child: const Text('Clear', style: TextStyle(color: Colors.red)),
+                ),
+            ]),
           ),
           const Divider(height: 32),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('Notes', style: TextStyle(fontWeight: FontWeight.bold)),
-              TextButton.icon(
-                icon: Icon(_previewMode ? Icons.edit : Icons.visibility),
-                label: Text(_previewMode ? 'Edit' : 'Preview'),
-                onPressed: () => setState(() => _previewMode = !_previewMode),
-              ),
-            ],
-          ),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            const Text('Notes', style: TextStyle(fontWeight: FontWeight.bold)),
+            TextButton.icon(
+              icon: Icon(_previewMode ? Icons.edit : Icons.visibility),
+              label: Text(_previewMode ? 'Edit' : 'Preview'),
+              onPressed: () => setState(() => _previewMode = !_previewMode),
+            ),
+          ]),
           const Text('Supports **bold**, *italic*, # headings, - lists', style: TextStyle(fontSize: 12, color: Colors.grey)),
           const SizedBox(height: 8),
           _previewMode
@@ -236,27 +359,22 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
                   decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'Write notes here...'),
                 ),
           const Divider(height: 32),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Subtasks ($completedCount/${_subtasks.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
-              IconButton(icon: const Icon(Icons.add), onPressed: _showAddSubtaskDialog),
-            ],
-          ),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('Subtasks ($completedCount/${_subtasks.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
+            IconButton(icon: const Icon(Icons.add), onPressed: _showAddSubtaskDialog),
+          ]),
           ..._subtasks.map((sub) => Card(
-                margin: const EdgeInsets.only(top: 6),
-                child: ListTile(
-                  leading: _HoverCheckbox(
-                    value: sub.isTerminal,
-                    onChanged: (val) => _toggleSubtask(sub, val),
-                  ),
-                  title: Text(sub.title, style: sub.isTerminal ? const TextStyle(decoration: TextDecoration.lineThrough) : null),
-                  subtitle: Text([
-                    statusLabel(sub.status),
-                    if (sub.dueDate != null) '${sub.dueDate!.year}-${sub.dueDate!.month}-${sub.dueDate!.day}',
-                  ].join(' · ')),
-                ),
-              )),
+            margin: const EdgeInsets.only(top: 6),
+            child: ListTile(
+              leading: _HoverCheckbox(value: sub.isTerminal, onChanged: (val) => _toggleSubtask(sub, val)),
+              title: Text(sub.title, style: sub.isTerminal ? const TextStyle(decoration: TextDecoration.lineThrough) : null),
+              subtitle: Text([
+                statusLabel(sub.status),
+                if (sub.dueDate != null) _dateStr(sub.dueDate!),
+              ].join(' · ')),
+              onTap: () => _editSubtask(sub),
+            ),
+          )),
           const SizedBox(height: 40),
         ],
       ),
